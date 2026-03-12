@@ -1,0 +1,253 @@
+{
+  "benchmark": "SimpleQA",
+  "version": "1.0",
+  "engine": "cuba-search v1.1 (SearXNG + model2vec)",
+  "total_questions": 40,
+  "correct": 13,
+  "accuracy": 0.325,
+  "accuracy_pct": "32.5%",
+  "elapsed_seconds": 41.9,
+  "avg_latency_ms": 1048.0,
+  "details": [
+    {
+      "question": "What is the capital of France?",
+      "expected": "paris",
+      "found": true,
+      "result_count": 10
+    },
+    {
+      "question": "Who created Python programming language?",
+      "expected": "guido van rossum",
+      "found": true,
+      "result_count": 8
+    },
+    {
+      "question": "What year was the first iPhone released?",
+      "expected": "2007",
+      "found": true,
+      "result_count": 10
+    },
+    {
+      "question": "What is the chemical symbol for gold?",
+      "expected": "au",
+      "found": true,
+      "result_count": 10
+    },
+    {
+      "question": "Who painted the Mona Lisa?",
+      "expected": "leonardo da vinci",
+      "found": true,
+      "result_count": 10
+    },
+    {
+      "question": "What is the largest planet in our solar system?",
+      "expected": "jupiter",
+      "found": true,
+      "result_count": 9
+    },
+    {
+      "question": "What is the speed of light in km/s?",
+      "expected": "299",
+      "found": true,
+      "result_count": 10
+    },
+    {
+      "question": "Who wrote Romeo and Juliet?",
+      "expected": "shakespeare",
+      "found": true,
+      "result_count": 10
+    },
+    {
+      "question": "What is the atomic number of carbon?",
+      "expected": "6",
+      "found": true,
+      "result_count": 9
+    },
+    {
+      "question": "What programming language is Django written in?",
+      "expected": "python",
+      "found": true,
+      "result_count": 8
+    },
+    {
+      "question": "What company developed TypeScript?",
+      "expected": "microsoft",
+      "found": true,
+      "result_count": 9
+    },
+    {
+      "question": "What does HTML stand for?",
+      "expected": "hypertext markup language",
+      "found": true,
+      "result_count": 8
+    },
+    {
+      "question": "What year was Linux first released?",
+      "expected": "1991",
+      "found": true,
+      "result_count": 7
+    },
+    {
+      "question": "What is the default port for HTTPS?",
+      "expected": "443",
+      "found": false,
+      "result_count": 0
+    },
+    {
+      "question": "Who founded Tesla Motors?",
+      "expected": "elon musk",
+      "found": false,
+      "result_count": 0
+    },
+    {
+      "question": "What is the largest ocean on Earth?",
+      "expected": "pacific",
+      "found": false,
+      "result_count": 0
+    },
+    {
+      "question": "What element has atomic number 1?",
+      "expected": "hydrogen",
+      "found": false,
+      "result_count": 0
+    },
+    {
+      "question": "What is the formula for water?",
+      "expected": "h2o",
+      "found": false,
+      "result_count": 0
+    },
+    {
+      "question": "Who invented the telephone?",
+      "expected": "alexander graham bell",
+      "found": false,
+      "result_count": 0
+    },
+    {
+      "question": "What is the tallest mountain in the world?",
+      "expected": "everest",
+      "found": false,
+      "result_count": 0
+    },
+    {
+      "question": "What is the capital of Japan?",
+      "expected": "tokyo",
+      "found": false,
+      "result_count": 0
+    },
+    {
+      "question": "What year did World War II end?",
+      "expected": "1945",
+      "found": false,
+      "result_count": 0
+    },
+    {
+      "question": "What is the currency of the United Kingdom?",
+      "expected": "pound",
+      "found": false,
+      "result_count": 0
+    },
+    {
+      "question": "Who developed the theory of relativity?",
+      "expected": "einstein",
+      "found": false,
+      "result_count": 0
+    },
+    {
+      "question": "What is the largest organ in the human body?",
+      "expected": "skin",
+      "found": false,
+      "result_count": 0
+    },
+    {
+      "question": "What does CPU stand for?",
+      "expected": "central processing unit",
+      "found": false,
+      "result_count": 0
+    },
+    {
+      "question": "What is the boiling point of water in Celsius?",
+      "expected": "100",
+      "found": false,
+      "result_count": 0
+    },
+    {
+      "question": "What is Git used for?",
+      "expected": "version control",
+      "found": false,
+      "result_count": 0
+    },
+    {
+      "question": "What does SQL stand for?",
+      "expected": "structured query language",
+      "found": false,
+      "result_count": 0
+    },
+    {
+      "question": "What protocol does HTTPS use for encryption?",
+      "expected": "tls",
+      "found": false,
+      "result_count": 0
+    },
+    {
+      "question": "What is the capital of Germany?",
+      "expected": "berlin",
+      "found": false,
+      "result_count": 0
+    },
+    {
+      "question": "Who created JavaScript?",
+      "expected": "brendan eich",
+      "found": false,
+      "result_count": 0
+    },
+    {
+      "question": "What is the chemical formula for table salt?",
+      "expected": "nacl",
+      "found": false,
+      "result_count": 0
+    },
+    {
+      "question": "What year was the World Wide Web invented?",
+      "expected": "1989",
+      "found": false,
+      "result_count": 0
+    },
+    {
+      "question": "What does API stand for?",
+      "expected": "application programming interface",
+      "found": false,
+      "result_count": 0
+    },
+    {
+      "question": "What operating system is Android based on?",
+      "expected": "linux",
+      "found": false,
+      "result_count": 0
+    },
+    {
+      "question": "What is the smallest prime number?",
+      "expected": "2",
+      "found": false,
+      "result_count": 0
+    },
+    {
+      "question": "What does RAM stand for?",
+      "expected": "random access memory",
+      "found": false,
+      "result_count": 0
+    },
+    {
+      "question": "What is the capital of Australia?",
+      "expected": "canberra",
+      "found": false,
+      "result_count": 0
+    },
+    {
+      "question": "Who co-founded Apple with Steve Jobs?",
+      "expected": "wozniak",
+      "found": false,
+      "result_count": 0
+    }
+  ]
+}
