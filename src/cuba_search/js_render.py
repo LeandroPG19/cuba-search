@@ -21,11 +21,11 @@ def is_available() -> bool:
     global _PLAYWRIGHT_AVAILABLE  # noqa: PLW0603
     if _PLAYWRIGHT_AVAILABLE is not None:
         return _PLAYWRIGHT_AVAILABLE
-    try:
-        import playwright  # noqa: F401
-        _PLAYWRIGHT_AVAILABLE = True
-    except ImportError:
-        _PLAYWRIGHT_AVAILABLE = False
+
+    import importlib.util
+
+    _PLAYWRIGHT_AVAILABLE = importlib.util.find_spec("playwright") is not None
+    if not _PLAYWRIGHT_AVAILABLE:
         logger.info("Playwright not installed — JS rendering disabled")
     return _PLAYWRIGHT_AVAILABLE
 
