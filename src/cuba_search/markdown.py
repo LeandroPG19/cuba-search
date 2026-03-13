@@ -9,6 +9,8 @@ from typing import Any
 
 from bs4 import BeautifulSoup, Tag
 
+_RE_EXCESS_NEWLINES = re.compile(r"\n{3,}")
+
 
 def html_to_markdown(html: str) -> str:
     """Convert HTML to clean Markdown.
@@ -32,7 +34,7 @@ def html_to_markdown(html: str) -> str:
     _walk(soup, parts)
 
     text = "\n".join(parts)
-    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = _RE_EXCESS_NEWLINES.sub("\n\n", text)
     return text.strip()
 
 
