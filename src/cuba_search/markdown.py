@@ -9,6 +9,9 @@ from typing import Any
 
 from bs4 import BeautifulSoup, Tag
 
+_RE_EXCESS_NEWLINES = re.compile(r"\n{3,}")
+_NOISE_TAGS = {"script", "style", "nav", "footer", "header", "aside"}
+
 
 def html_to_markdown(html: str) -> str:
     """Convert HTML to clean Markdown.
@@ -22,17 +25,17 @@ def html_to_markdown(html: str) -> str:
     Returns:
         Markdown-formatted string.
     """
-    soup = BeautifulSoup(html, "html.parser")
-
-    # Remove noise tags
-    for tag in soup.find_all(["script", "style", "nav", "footer", "header", "aside"]):
-        tag.decompose()
+    # Use lxml if available for faster parsing
+    try:
+        soup = BeautifulSoup(html, "lxml")
+    except Exception:
+        soup = BeautifulSoup(html, "html.parser")
 
     parts: list[str] = []
     _walk(soup, parts)
 
     text = "\n".join(parts)
-    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = _RE_EXCESS_NEWLINES.sub("\n\n", text)
     return text.strip()
 
 
@@ -119,6 +122,7 @@ _TAG_HANDLERS: dict[str, Any] = {
     "table": lambda el, parts: _convert_table(el, parts),
     "ul": lambda el, parts: _convert_list(el, parts, ordered=False),
     "ol": lambda el, parts: _convert_list(el, parts, ordered=True),
+    "br": lambda el, parts: parts.append("\n"),
 }
 
 
@@ -140,14 +144,13 @@ def _walk(element: Any, parts: list[str]) -> None:
 
     tag = element.name
 
+    # Skip noise tags
+    if tag in _NOISE_TAGS:
+        return
+
     # Inline code special case (needs parent check)
     if tag == "code" and element.parent and element.parent.name != "pre":
         _handle_inline_code(element, parts)
-        return
-
-    # Line breaks
-    if tag == "br":
-        parts.append("\n")
         return
 
     # Dispatch to handler
@@ -204,9 +207,10 @@ def _convert_list(lst: Tag, parts: list[str], ordered: bool = False) -> None:
         parts: Accumulator list.
         ordered: Whether list is ordered.
     """
-    items = lst.find_all("li", recursive=False)
-    for i, item in enumerate(items):
-        prefix = f"{i + 1}. " if ordered else "- "
-        text = item.get_text(strip=True)
-        parts.append(f"{prefix}{text}")
-    parts.append("")
+    i = 1
+    for child in lst.children:
+        if isinstance(child, Tag) and child.name == "li":
+            prefix = f"{i}. " if ordered else "- "
+            text = child.get_text(strip=True)
+            parts.append(f"{prefix}{text}")
+            i += 1
