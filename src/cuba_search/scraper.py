@@ -19,11 +19,13 @@ logger = logging.getLogger("cuba-search.scraper")
 
 # ── SSRF Protection (OWASP A01 2025) ──────────────────────────────
 _PRIVATE_RANGES = [
+    ipaddress.ip_network("0.0.0.0/8"),
     ipaddress.ip_network("10.0.0.0/8"),
     ipaddress.ip_network("172.16.0.0/12"),
     ipaddress.ip_network("192.168.0.0/16"),
     ipaddress.ip_network("127.0.0.0/8"),
     ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("::/128"),
     ipaddress.ip_network("::1/128"),
     ipaddress.ip_network("fc00::/7"),
     ipaddress.ip_network("fe80::/10"),
@@ -47,6 +49,20 @@ _HEADERS = {
 
 # robots.txt cache (in-memory, small)
 _robots_cache: dict[str, tuple[float, bool]] = {}
+
+
+def _ssrf_redirect_hook(request: httpx.Request) -> None:
+    """Validate every outgoing request (including redirects).
+
+    Args:
+        request: The httpx Request object.
+
+    Raises:
+        httpx.RequestError: If the URL fails SSRF safety check.
+    """
+    if not _is_ssrf_safe(str(request.url)):
+        msg = f"SSRF Protection: Blocked access to {request.url}"
+        raise httpx.RequestError(msg)
 
 
 def _is_ssrf_safe(url: str) -> bool:
@@ -156,7 +172,10 @@ async def fetch_raw_html(
         return None
 
     async with httpx.AsyncClient(
-        headers=_HEADERS, follow_redirects=True, timeout=timeout,
+        headers=_HEADERS,
+        follow_redirects=True,
+        timeout=timeout,
+        event_hooks={"request": [_ssrf_redirect_hook]},
     ) as client:
         try:
             allowed = await check_robots_txt(client, url)
@@ -201,7 +220,10 @@ async def scrape_url(
     own_client = client is None
     if own_client:
         client = httpx.AsyncClient(
-            headers=_HEADERS, follow_redirects=True, timeout=timeout,
+            headers=_HEADERS,
+            follow_redirects=True,
+            timeout=timeout,
+            event_hooks={"request": [_ssrf_redirect_hook]},
         )
 
     assert client is not None  # type narrowing for mypy
