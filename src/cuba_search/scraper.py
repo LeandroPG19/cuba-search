@@ -68,6 +68,8 @@ def _ssrf_redirect_hook(request: httpx.Request) -> None:
 def _is_ssrf_safe(url: str) -> bool:
     """Validate URL is not targeting private/internal networks.
 
+    Supports IPv4/v6, including integer formats and local hostnames.
+
     Args:
         url: URL to validate.
 
@@ -80,13 +82,31 @@ def _is_ssrf_safe(url: str) -> bool:
     hostname = parsed.hostname
     if not hostname:
         return False
+
+    lower = hostname.lower()
+    # 1. Check for literal local hostnames/patterns
+    if lower in {"localhost", "0.0.0.0", "[::1]", "::1"}:
+        return False
+    if any(lower.endswith(s) for s in (".local", ".internal", ".lan", ".home.arpa")):
+        return False
+
+    # 2. Try parsing as IP address (handles decimal/hex integers too)
     try:
-        addr = ipaddress.ip_address(hostname)
+        # If hostname is an integer (decimal or hex), ip_address() converts it
+        if lower.startswith("0x"):
+            addr = ipaddress.ip_address(int(lower, 16))
+        elif lower.isdigit():
+            addr = ipaddress.ip_address(int(lower))
+        else:
+            addr = ipaddress.ip_address(lower)
+
         return not any(addr in net for net in _PRIVATE_RANGES)
-    except ValueError:
-        # Hostname (not IP) — check for localhost patterns
-        lower = hostname.lower()
-        return lower not in {"localhost", "0.0.0.0", "[::1]"}
+    except (ValueError, OverflowError):
+        # Not a direct IP — hostname is likely a domain name.
+        # Note: In production, we'd also want to resolve the domain to IPs,
+        # but httpx doesn't make that easy without a custom transport.
+        # We rely on the request hook for final IP validation.
+        return True
 
 
 def _parse_robots_disallowed(text: str, path: str) -> bool:

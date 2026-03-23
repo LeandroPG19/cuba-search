@@ -45,6 +45,14 @@ def test_is_ssrf_safe():
     assert _is_ssrf_safe("http://0.1.2.3") is False
     assert _is_ssrf_safe("http://[::]") is False
 
+    # Integer IP formats
+    assert _is_ssrf_safe("http://2130706433") is False  # 127.0.0.1
+    assert _is_ssrf_safe("http://0x7f000001") is False  # 127.0.0.1
+
+    # Internal hostnames
+    assert _is_ssrf_safe("http://service.local") is False
+    assert _is_ssrf_safe("http://database.internal") is False
+
     # Schemes
     assert _is_ssrf_safe("file:///etc/passwd") is False
     assert _is_ssrf_safe("gopher://localhost") is False
