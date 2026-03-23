@@ -3,9 +3,8 @@
 Filters noise, classifies results, normalizes URLs.
 CC: all functions ≤ 5.
 """
-import re
-from urllib.parse import urlparse, urlunparse
 from typing import Any
+from urllib.parse import urlparse, urlunparse
 
 # ── V2: Domain blacklist (configurable) ────────────────────────────
 DEFAULT_BLACKLIST: frozenset[str] = frozenset({
