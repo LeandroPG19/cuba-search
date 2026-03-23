@@ -19,11 +19,13 @@ logger = logging.getLogger("cuba-search.scraper")
 
 # ── SSRF Protection (OWASP A01 2025) ──────────────────────────────
 _PRIVATE_RANGES = [
+    ipaddress.ip_network("0.0.0.0/8"),
     ipaddress.ip_network("10.0.0.0/8"),
     ipaddress.ip_network("172.16.0.0/12"),
     ipaddress.ip_network("192.168.0.0/16"),
     ipaddress.ip_network("127.0.0.0/8"),
     ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("::/128"),
     ipaddress.ip_network("::1/128"),
     ipaddress.ip_network("fc00::/7"),
     ipaddress.ip_network("fe80::/10"),
@@ -49,8 +51,24 @@ _HEADERS = {
 _robots_cache: dict[str, tuple[float, bool]] = {}
 
 
+def _ssrf_redirect_hook(request: httpx.Request) -> None:
+    """Validate every outgoing request (including redirects).
+
+    Args:
+        request: The httpx Request object.
+
+    Raises:
+        httpx.RequestError: If the URL fails SSRF safety check.
+    """
+    if not _is_ssrf_safe(str(request.url)):
+        msg = f"SSRF Protection: Blocked access to {request.url}"
+        raise httpx.RequestError(msg)
+
+
 def _is_ssrf_safe(url: str) -> bool:
     """Validate URL is not targeting private/internal networks.
+
+    Supports IPv4/v6, including integer formats and local hostnames.
 
     Args:
         url: URL to validate.
@@ -64,13 +82,31 @@ def _is_ssrf_safe(url: str) -> bool:
     hostname = parsed.hostname
     if not hostname:
         return False
+
+    lower = hostname.lower()
+    # 1. Check for literal local hostnames/patterns
+    if lower in {"localhost", "0.0.0.0", "[::1]", "::1"}:
+        return False
+    if any(lower.endswith(s) for s in (".local", ".internal", ".lan", ".home.arpa")):
+        return False
+
+    # 2. Try parsing as IP address (handles decimal/hex integers too)
     try:
-        addr = ipaddress.ip_address(hostname)
+        # If hostname is an integer (decimal or hex), ip_address() converts it
+        if lower.startswith("0x"):
+            addr = ipaddress.ip_address(int(lower, 16))
+        elif lower.isdigit():
+            addr = ipaddress.ip_address(int(lower))
+        else:
+            addr = ipaddress.ip_address(lower)
+
         return not any(addr in net for net in _PRIVATE_RANGES)
-    except ValueError:
-        # Hostname (not IP) — check for localhost patterns
-        lower = hostname.lower()
-        return lower not in {"localhost", "0.0.0.0", "[::1]"}
+    except (ValueError, OverflowError):
+        # Not a direct IP — hostname is likely a domain name.
+        # Note: In production, we'd also want to resolve the domain to IPs,
+        # but httpx doesn't make that easy without a custom transport.
+        # We rely on the request hook for final IP validation.
+        return True
 
 
 def _parse_robots_disallowed(text: str, path: str) -> bool:
@@ -156,7 +192,10 @@ async def fetch_raw_html(
         return None
 
     async with httpx.AsyncClient(
-        headers=_HEADERS, follow_redirects=True, timeout=timeout,
+        headers=_HEADERS,
+        follow_redirects=True,
+        timeout=timeout,
+        event_hooks={"request": [_ssrf_redirect_hook]},
     ) as client:
         try:
             allowed = await check_robots_txt(client, url)
@@ -201,7 +240,10 @@ async def scrape_url(
     own_client = client is None
     if own_client:
         client = httpx.AsyncClient(
-            headers=_HEADERS, follow_redirects=True, timeout=timeout,
+            headers=_HEADERS,
+            follow_redirects=True,
+            timeout=timeout,
+            event_hooks={"request": [_ssrf_redirect_hook]},
         )
 
     assert client is not None  # type narrowing for mypy

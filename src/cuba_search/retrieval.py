@@ -18,6 +18,8 @@ from typing import Any
 import httpx
 from bs4 import BeautifulSoup
 
+from cuba_search.scraper import _ssrf_redirect_hook
+
 logger = logging.getLogger("cuba-search.retrieval")
 
 # ── Configuration ──────────────────────────────────────────────────
@@ -76,6 +78,17 @@ class CircuitBreaker:
 
 
 _searxng_breaker = CircuitBreaker(threshold=5, recovery_timeout=60.0)
+
+
+def _retrieval_ssrf_hook(request: httpx.Request) -> None:
+    """SSRF validation hook for search backends.
+
+    Allows SEARXNG_URL (which might be local), but validates all other targets.
+    """
+    url_str = str(request.url)
+    if url_str.startswith(SEARXNG_URL):
+        return
+    _ssrf_redirect_hook(request)
 
 
 async def _retry_request(
@@ -150,25 +163,26 @@ async def search_searxng(
     if engines:
         params["engines"] = engines
 
-    async with _search_semaphore:
-        async with httpx.AsyncClient(
-            headers=_HEADERS, follow_redirects=True,
-        ) as client:
-            try:
-                resp = await _retry_request(
-                    client,
-                    f"{SEARXNG_URL}/search",
-                    params=params,
-                )
-                data = resp.json()
-                _searxng_breaker.record_success()
-            except (httpx.HTTPError, ValueError) as e:
-                _searxng_breaker.record_failure()
-                logger.warning(
-                    "SearXNG failure #%d: %s",
-                    _searxng_breaker._failures, e,
-                )
-                return await search_duckduckgo(query, max_results)
+    async with _search_semaphore, httpx.AsyncClient(
+        headers=_HEADERS,
+        follow_redirects=True,
+        event_hooks={"request": [_retrieval_ssrf_hook]},
+    ) as client:
+        try:
+            resp = await _retry_request(
+                client,
+                f"{SEARXNG_URL}/search",
+                params=params,
+            )
+            data = resp.json()
+            _searxng_breaker.record_success()
+        except (httpx.HTTPError, ValueError) as e:
+            _searxng_breaker.record_failure()
+            logger.warning(
+                "SearXNG failure #%d: %s",
+                _searxng_breaker._failures, e,
+            )
+            return await search_duckduckgo(query, max_results)
 
     results = data.get("results", [])[:max_results]
     return [
@@ -202,16 +216,17 @@ async def search_duckduckgo(
     url = "https://lite.duckduckgo.com/lite/"
     data = {"q": query}
 
-    async with _search_semaphore:
-        async with httpx.AsyncClient(
-            headers=_HEADERS, follow_redirects=True,
-        ) as client:
-            try:
-                resp = await client.post(url, data=data, timeout=15.0)
-                resp.raise_for_status()
-            except (httpx.HTTPError, TimeoutError) as e:
-                logger.error("DuckDuckGo search failed: %s", e)
-                return []
+    async with _search_semaphore, httpx.AsyncClient(
+        headers=_HEADERS,
+        follow_redirects=True,
+        event_hooks={"request": [_ssrf_redirect_hook]},
+    ) as client:
+        try:
+            resp = await client.post(url, data=data, timeout=15.0)
+            resp.raise_for_status()
+        except (httpx.HTTPError, TimeoutError) as e:
+            logger.error("DuckDuckGo search failed: %s", e)
+            return []
 
     soup = BeautifulSoup(resp.text, "html.parser")
     results: list[dict[str, Any]] = []

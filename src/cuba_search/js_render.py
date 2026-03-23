@@ -7,6 +7,8 @@ CC: all functions ≤ 5.
 import logging
 from typing import Any
 
+from cuba_search.scraper import _is_ssrf_safe
+
 logger = logging.getLogger("cuba-search.js_render")
 
 _PLAYWRIGHT_AVAILABLE: bool | None = None  # None = not checked yet
@@ -54,7 +56,20 @@ async def render_page(
         async with async_playwright() as pw:
             browser = await pw.chromium.launch(headless=True)
             try:
-                page = await browser.new_page()
+                # V17: SSRF Protection for Playwright
+                context = await browser.new_context()
+                page = await context.new_page()
+
+                # Intercept all requests to prevent SSRF (including redirects)
+                async def intercept(route: Any) -> None:
+                    if _is_ssrf_safe(route.request.url):
+                        await route.continue_()
+                    else:
+                        logger.warning("SSRF Blocked Playwright request: %s", route.request.url)
+                        await route.abort("blockedbyclient")
+
+                await page.route("**/*", intercept)
+
                 await page.goto(
                     url,
                     timeout=timeout_ms,
