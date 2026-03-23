@@ -4,6 +4,7 @@ Each handler orchestrates the pipeline stages for its tool.
 Dispatch table at module level for O(1) routing.
 CC: all handlers ≤ 7.
 """
+import asyncio
 import json
 import logging
 from typing import Any
@@ -272,12 +273,12 @@ async def _search_sub_queries(
     Returns:
         Fused results from all sub-queries.
     """
-    all_rankings: list[list[dict[str, Any]]] = []
-    for sq in sub_queries:
+    async def _process_sub_query(sq: str) -> list[dict[str, Any]]:
         results = await retrieval.search(sq, max_results=max_results)
         results = quality.filter_and_classify(results)
-        results = ranking.bm25_rank(sq, results, text_key="content")
-        all_rankings.append(results)
+        return ranking.bm25_rank(sq, results, text_key="content")
+
+    all_rankings = await asyncio.gather(*[_process_sub_query(sq) for sq in sub_queries])
 
     if len(all_rankings) > 1:
         return ranking.rrf_fuse(all_rankings)
