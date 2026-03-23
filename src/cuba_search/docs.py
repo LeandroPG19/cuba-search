@@ -7,7 +7,6 @@ CC: all functions ≤ 7.
 """
 import json
 import logging
-import re
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +14,7 @@ import httpx
 
 from cuba_search.cache import TTLCache, normalize_cache_key
 from cuba_search.compression import compress_to_budget
-from cuba_search.scraper import scrape_url
+from cuba_search.scraper import _ssrf_redirect_hook, scrape_url
 
 logger = logging.getLogger("cuba-search.docs")
 
@@ -133,7 +132,10 @@ async def resolve_docs_url(library: str) -> str | None:
         return lib_map[normalized]
 
     # 2. Try PyPI
-    async with httpx.AsyncClient(headers=_HEADERS) as client:
+    async with httpx.AsyncClient(
+        headers=_HEADERS,
+        event_hooks={"request": [_ssrf_redirect_hook]},
+    ) as client:
         url = await _resolve_pypi(client, normalized)
         if url:
             return url

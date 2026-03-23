@@ -7,6 +7,8 @@ CC: all functions ≤ 5.
 import logging
 from typing import Any
 
+from cuba_search.scraper import _is_ssrf_safe
+
 logger = logging.getLogger("cuba-search.js_render")
 
 _PLAYWRIGHT_AVAILABLE: bool | None = None  # None = not checked yet
@@ -55,6 +57,17 @@ async def render_page(
             browser = await pw.chromium.launch(headless=True)
             try:
                 page = await browser.new_page()
+
+                # SSRF Protection: Intercept all network requests
+                async def intercept(route: Any) -> None:
+                    if not _is_ssrf_safe(route.request.url):
+                        logger.warning("Playwright SSRF block: %s", route.request.url)
+                        await route.abort("addressunreachable")
+                    else:
+                        await route.continue_()
+
+                await page.route("**/*", intercept)
+
                 await page.goto(
                     url,
                     timeout=timeout_ms,
