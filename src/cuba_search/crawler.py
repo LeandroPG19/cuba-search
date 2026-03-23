@@ -12,7 +12,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from cuba_search.quality import normalize_url
-from cuba_search.scraper import scrape_url, _is_ssrf_safe, _HEADERS
+from cuba_search.scraper import _HEADERS, _is_ssrf_safe, _ssrf_redirect_hook, scrape_url
 
 logger = logging.getLogger("cuba-search.crawler")
 
@@ -118,7 +118,10 @@ async def crawl(
     base_domain = urlparse(start_url).netloc.lower()
 
     async with httpx.AsyncClient(
-        headers=_HEADERS, follow_redirects=True, timeout=15.0,
+        headers=_HEADERS,
+        follow_redirects=True,
+        timeout=15.0,
+        event_hooks={"request": [_ssrf_redirect_hook]},
     ) as client:
         while queue and len(results) < max_pages:
             url, depth = queue.pop(0)
@@ -132,7 +135,9 @@ async def crawl(
             if scraped.get("status") != "ok":
                 continue
 
-            if instructions and not _matches_instructions(scraped.get("content", ""), instructions):
+            if instructions and not _matches_instructions(
+                scraped.get("content", ""), instructions
+            ):
                 continue
 
             results.append({**scraped, "depth": depth})

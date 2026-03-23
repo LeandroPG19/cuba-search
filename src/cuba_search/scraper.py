@@ -24,7 +24,9 @@ _PRIVATE_RANGES = [
     ipaddress.ip_network("192.168.0.0/16"),
     ipaddress.ip_network("127.0.0.0/8"),
     ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("0.0.0.0/8"),
     ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("::/128"),
     ipaddress.ip_network("fc00::/7"),
     ipaddress.ip_network("fe80::/10"),
 ]
@@ -64,13 +66,50 @@ def _is_ssrf_safe(url: str) -> bool:
     hostname = parsed.hostname
     if not hostname:
         return False
+
+    # 1. Attempt to parse as IP address (including decimal/hex integer formats)
+    addr: ipaddress.IPv4Address | ipaddress.IPv6Address | None = None
     try:
         addr = ipaddress.ip_address(hostname)
-        return not any(addr in net for net in _PRIVATE_RANGES)
     except ValueError:
-        # Hostname (not IP) — check for localhost patterns
-        lower = hostname.lower()
-        return lower not in {"localhost", "0.0.0.0", "[::1]"}
+        # Check for integer IP bypasses (e.g., 2130706433 or 0x7f000001)
+        try:
+            # Handle octal with leading zeros if necessary
+            h = hostname
+            if h.startswith("0") and not h.startswith(("0x", "0X")) and len(h) > 1 and h[1].isdigit():
+                val = int(h, 8)
+            else:
+                val = int(h, 0)
+
+            if 0 <= val <= 0xFFFFFFFF:  # IPv4 range
+                addr = ipaddress.ip_address(val)
+        except (ValueError, OverflowError):
+            pass
+
+    if addr:
+        return not any(addr in net for net in _PRIVATE_RANGES)
+
+    # 2. Hostname (not IP) — check for localhost and local network patterns
+    lower = hostname.lower()
+    if lower in {"localhost", "0.0.0.0", "[::1]", "::1"}:
+        return False
+
+    # Block local/internal network patterns
+    return not lower.endswith((".local", ".internal", ".lan", ".home.arpa"))
+
+
+def _ssrf_redirect_hook(request: httpx.Request) -> None:
+    """Validate every request/redirect URL against SSRF.
+
+    Args:
+        request: The httpx request object.
+
+    Raises:
+        httpx.ConnectError: If URL is unsafe.
+    """
+    if not _is_ssrf_safe(str(request.url)):
+        msg = f"SSRF: Private network access blocked for {request.url}"
+        raise httpx.ConnectError(msg)
 
 
 def _parse_robots_disallowed(text: str, path: str) -> bool:
@@ -156,7 +195,10 @@ async def fetch_raw_html(
         return None
 
     async with httpx.AsyncClient(
-        headers=_HEADERS, follow_redirects=True, timeout=timeout,
+        headers=_HEADERS,
+        follow_redirects=True,
+        timeout=timeout,
+        event_hooks={"request": [_ssrf_redirect_hook]},
     ) as client:
         try:
             allowed = await check_robots_txt(client, url)
@@ -201,7 +243,10 @@ async def scrape_url(
     own_client = client is None
     if own_client:
         client = httpx.AsyncClient(
-            headers=_HEADERS, follow_redirects=True, timeout=timeout,
+            headers=_HEADERS,
+            follow_redirects=True,
+            timeout=timeout,
+            event_hooks={"request": [_ssrf_redirect_hook]},
         )
 
     assert client is not None  # type narrowing for mypy
