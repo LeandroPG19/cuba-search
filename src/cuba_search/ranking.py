@@ -5,13 +5,21 @@ H/H_max from cuba-memorys/hebbian.py:79-95.
 Multi-signal confidence from cuba-memorys/search.py:72-109.
 CC: all functions ≤ 7.
 """
+
 import math
 from collections import Counter
 from typing import Any
 
 # ── BM25 Parameters (Robertson & Zaragoza 2009) ────────────────────
-BM25_K1: float = 1.2   # Term saturation
-BM25_B: float = 0.75   # Length normalization
+# Domain-adapted per query intent (El-Kishky et al. 2024, NeurIPS)
+_BM25_PARAMS: dict[str, dict[str, float]] = {
+    "code": {"k1": 0.9, "b": 0.50},  # Short docs, repetitive symbol names
+    "academic": {"k1": 1.5, "b": 0.85},  # Long docs, length is informative
+    "navigational": {"k1": 1.0, "b": 0.60},  # Exact title match preferred
+    "informational": {"k1": 1.2, "b": 0.75},  # Default (Robertson & Zaragoza 2009)
+}
+BM25_K1: float = 1.2  # Term saturation (kept for bm25_score() direct calls)
+BM25_B: float = 0.75  # Length normalization
 
 # ── RRF Constant (Cormack et al. 2009) ─────────────────────────────
 RRF_K: int = 60
@@ -47,9 +55,7 @@ def bm25_score(
         df = doc_freq.get(qt, 0)
         idf = math.log((total_docs - df + 0.5) / (df + 0.5) + 1.0)
         numerator = tf * (BM25_K1 + 1.0)
-        denominator = tf + BM25_K1 * (
-            1.0 - BM25_B + BM25_B * doc_len / max(avg_doc_len, 1.0)
-        )
+        denominator = tf + BM25_K1 * (1.0 - BM25_B + BM25_B * doc_len / max(avg_doc_len, 1.0))
         score += idf * (numerator / denominator)
     return score
 
@@ -58,13 +64,19 @@ def bm25_rank(
     query: str,
     documents: list[dict[str, Any]],
     text_key: str = "content",
+    intent: str = "informational",
 ) -> list[dict[str, Any]]:
     """Rank documents by BM25 relevance to query.
+
+    Uses domain-adapted k1/b parameters based on query intent.
+    Robertson & Zaragoza (2009): optimal k1/b vary by document collection.
 
     Args:
         query: Search query string.
         documents: List of result dicts with text content.
         text_key: Key in dict containing text to score.
+        intent: Query intent for BM25 parameter selection
+            (code/academic/navigational/informational).
 
     Returns:
         Documents sorted by BM25 score (descending), with 'bm25_score' added.
@@ -72,10 +84,11 @@ def bm25_rank(
     if not documents:
         return []
 
+    params = _BM25_PARAMS.get(intent, _BM25_PARAMS["informational"])
+    k1, b = params["k1"], params["b"]
+
     query_terms = query.lower().split()
-    all_doc_terms = [
-        d.get(text_key, "").lower().split() for d in documents
-    ]
+    all_doc_terms = [d.get(text_key, "").lower().split() for d in documents]
 
     # Compute document frequencies
     doc_freq: dict[str, int] = {}
@@ -88,7 +101,19 @@ def bm25_rank(
 
     scored = []
     for doc, terms in zip(documents, all_doc_terms, strict=True):
-        s = bm25_score(query_terms, terms, doc_freq, total_docs, avg_len)
+        # Inline BM25 with intent-specific k1/b (avoids modifying bm25_score signature)
+        s = 0.0
+        doc_len = len(terms)
+        term_counts = Counter(terms)
+        for qt in query_terms:
+            tf = term_counts.get(qt, 0)
+            if tf == 0:
+                continue
+            df = doc_freq.get(qt, 0)
+            idf = math.log((total_docs - df + 0.5) / (df + 0.5) + 1.0)
+            numerator = tf * (k1 + 1.0)
+            denominator = tf + k1 * (1.0 - b + b * doc_len / max(avg_len, 1.0))
+            s += idf * (numerator / denominator)
         scored.append({**doc, "bm25_score": round(s, 4)})
 
     scored.sort(key=lambda d: d["bm25_score"], reverse=True)
@@ -121,9 +146,7 @@ def rrf_fuse(
                 items[key] = item
 
     sorted_keys = sorted(scores, key=scores.__getitem__, reverse=True)
-    return [
-        {**items[k], "rrf_score": round(scores[k], 4)} for k in sorted_keys
-    ]
+    return [{**items[k], "rrf_score": round(scores[k], 4)} for k in sorted_keys]
 
 
 def information_density(text: str) -> float:
@@ -154,8 +177,15 @@ def compute_confidence(
     info_density: float,
     cross_agreement: float,
     semantic_score: float = 0.0,
+    w_content: float = 0.25,
+    w_tier: float = 0.20,
+    w_freshness: float = 0.15,
 ) -> tuple[float, str]:
     """Multi-signal weighted confidence — from cuba-memorys/search.py:72-109.
+
+    Weights for content_relevance, source_tier, and freshness are adjustable
+    to support temporal query boosting (M3). semantic, info_density, and
+    cross_agreement weights are fixed (0.20, 0.10, 0.10).
 
     Args:
         content_relevance: BM25/relevance score [0, 1].
@@ -164,15 +194,18 @@ def compute_confidence(
         info_density: H/H_max information density [0, 1].
         cross_agreement: Cross-source agreement [0, 1].
         semantic_score: model2vec cosine similarity [0, 1].
+        w_content: Weight for content_relevance (default 0.25).
+        w_tier: Weight for source_tier (default 0.20).
+        w_freshness: Weight for freshness (default 0.15).
 
     Returns:
         Tuple of (confidence score, confidence level string).
     """
     score = (
-        0.25 * content_relevance
-        + 0.20 * source_tier
+        w_content * content_relevance
+        + w_tier * source_tier
         + 0.20 * semantic_score
-        + 0.15 * freshness
+        + w_freshness * freshness
         + 0.10 * info_density
         + 0.10 * cross_agreement
     )
@@ -188,4 +221,3 @@ def compute_confidence(
         level = "unknown"
 
     return round(score, 4), level
-

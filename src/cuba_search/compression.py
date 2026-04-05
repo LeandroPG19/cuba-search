@@ -4,9 +4,11 @@ Reuses the same BM25 algorithm from ranking.py at sentence level.
 No TextRank graph — simpler and faster.
 CC: all functions ≤ 5.
 """
+
 import re
 from typing import Any
 
+from cuba_search.partitioning import distribute_budget
 from cuba_search.ranking import bm25_score
 
 # Sentence boundary regex (handles abbreviations somewhat)
@@ -48,7 +50,7 @@ def compress_to_budget(
     """
     sentences = split_sentences(text)
     if not sentences:
-        return text[:max_tokens * 4]  # Rough char-to-token estimate
+        return text[: max_tokens * 4]  # Rough char-to-token estimate
 
     query_terms = query.lower().split()
 
@@ -109,13 +111,15 @@ def compress_results(
     if not results:
         return []
 
-    per_result = total_budget // max(len(results), 1)
+    # Weighted budget: top results (higher relevance) get more tokens.
+    # Uses linear decay from partitioning.distribute_budget() — already exists.
+    budgets = distribute_budget(len(results), total_budget)
     compressed = []
-    for result in results:
+    for result, budget in zip(results, budgets, strict=False):
         content = result.get(content_key, "")
         if not content:
             compressed.append(result)
             continue
-        c = compress_to_budget(content, query, max_tokens=per_result)
+        c = compress_to_budget(content, query, max_tokens=budget)
         compressed.append({**result, content_key: c})
     return compressed

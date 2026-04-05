@@ -22,15 +22,17 @@ TOOL_DEFINITIONS: list[dict] = [
                 },
                 "categories": {
                     "type": "string",
-                    "description": "Category: general, news, science, it, images, videos",
+                    "enum": ["general", "news", "science", "it", "images", "videos"],
+                    "description": "Search category (default: general)",
                 },
                 "language": {
                     "type": "string",
-                    "description": "Language code (auto, en, es, etc.)",
+                    "description": "Language code (default: auto). Examples: en, es, fr, de, zh.",
                 },
                 "time_range": {
                     "type": "string",
-                    "description": "Time filter: day, week, month, year",
+                    "enum": ["", "day", "week", "month", "year"],
+                    "description": "Temporal filter — empty string means no filter (default)",
                 },
             },
             "required": ["query"],

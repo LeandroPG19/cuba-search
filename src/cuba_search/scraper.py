@@ -4,8 +4,9 @@ Uses readability-lxml for clean content extraction.
 Respects robots.txt, implements SSRF protection (OWASP A01 2025).
 V17: Optional Playwright fallback for JS-rendered pages (SPAs).
 V17: Markdown structured output via html_to_markdown.
-CC: all functions ≤ 7 (scrape_url CC=11, justified state machine).
+CC: all functions ≤ 7 (scrape_url CC=14, justified state machine).
 """
+
 import ipaddress
 import logging
 import re
@@ -29,16 +30,51 @@ _PRIVATE_RANGES = [
     ipaddress.ip_network("fe80::/10"),
 ]
 
-_BLOCKED_SCHEMES: frozenset[str] = frozenset({
-    "file", "ftp", "gopher", "data", "javascript",
-})
+_BLOCKED_SCHEMES: frozenset[str] = frozenset(
+    {
+        "file",
+        "ftp",
+        "gopher",
+        "data",
+        "javascript",
+    }
+)
+
+# M8: SPA detection — React/Vue/Next.js CSR apps return minimal HTML
+# until JS executes. Detect common root element patterns.
+_SPA_PATTERN = re.compile(
+    r'<div[^>]+id=["\'](?:root|app|__next|__nuxt|main-app)["\']',
+    re.IGNORECASE,
+)
+
+
+def _needs_js_render(content: str, raw_html: str) -> bool:
+    """Return True if Playwright JS rendering should be attempted.
+
+    Triggers when extracted content is very short (< 300 chars) or when
+    the raw HTML matches known SPA root element patterns (React/Vue/Next.js
+    CSR) with minimal content (< 500 chars).
+
+    Extracted to keep scrape_url CC within acceptable bounds.
+
+    Args:
+        content: Already-extracted plain text content.
+        raw_html: Raw HTML of the page response.
+
+    Returns:
+        True if JS rendering fallback should be triggered.
+    """
+    content_len = len(content)
+    if content_len >= 500:
+        return False
+    if content_len < 300:
+        return True
+    return bool(_SPA_PATTERN.search(raw_html))
+
 
 # ── HTTP Client Config ─────────────────────────────────────────────
 _DEFAULT_TIMEOUT = 15.0
-_USER_AGENT = (
-    "Mozilla/5.0 (compatible; CubaSearch/1.0; "
-    "+https://github.com/cuba-search)"
-)
+_USER_AGENT = "Mozilla/5.0 (compatible; CubaSearch/1.0; +https://github.com/cuba-search)"
 _HEADERS = {
     "User-Agent": _USER_AGENT,
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9",
@@ -112,6 +148,7 @@ async def check_robots_txt(
         True if URL is allowed or robots.txt is unavailable.
     """
     import time
+
     parsed = urlparse(url)
     domain = f"{parsed.scheme}://{parsed.netloc}"
 
@@ -131,7 +168,10 @@ async def check_robots_txt(
         disallowed = _parse_robots_disallowed(resp.text.lower(), path)
         _robots_cache[domain] = (time.monotonic(), not disallowed)
         return not disallowed
-    except (httpx.HTTPError, TimeoutError):
+    except httpx.HTTPError:
+        _robots_cache[domain] = (time.monotonic(), True)
+        return True
+    except TimeoutError:
         _robots_cache[domain] = (time.monotonic(), True)
         return True
 
@@ -156,7 +196,9 @@ async def fetch_raw_html(
         return None
 
     async with httpx.AsyncClient(
-        headers=_HEADERS, follow_redirects=True, timeout=timeout,
+        headers=_HEADERS,
+        follow_redirects=True,
+        timeout=timeout,
     ) as client:
         try:
             allowed = await check_robots_txt(client, url)
@@ -165,7 +207,9 @@ async def fetch_raw_html(
             resp = await client.get(url, timeout=timeout)
             resp.raise_for_status()
             return resp.text
-        except (httpx.HTTPError, TimeoutError):
+        except httpx.HTTPError:
+            return None
+        except TimeoutError:
             return None
 
 
@@ -194,14 +238,19 @@ async def scrape_url(
     """
     if not _is_ssrf_safe(url):
         return {
-            "url": url, "title": "", "content": "",
-            "status": "blocked", "error": "SSRF: private network",
+            "url": url,
+            "title": "",
+            "content": "",
+            "status": "blocked",
+            "error": "SSRF: private network",
         }
 
     own_client = client is None
     if own_client:
         client = httpx.AsyncClient(
-            headers=_HEADERS, follow_redirects=True, timeout=timeout,
+            headers=_HEADERS,
+            follow_redirects=True,
+            timeout=timeout,
         )
 
     assert client is not None  # type narrowing for mypy
@@ -211,8 +260,11 @@ async def scrape_url(
             allowed = await check_robots_txt(client, url)
             if not allowed:
                 return {
-                    "url": url, "title": "", "content": "",
-                    "status": "blocked", "error": "robots.txt disallowed",
+                    "url": url,
+                    "title": "",
+                    "content": "",
+                    "status": "blocked",
+                    "error": "robots.txt disallowed",
                 }
 
         resp = await client.get(url, timeout=timeout)
@@ -221,18 +273,22 @@ async def scrape_url(
         content_type = resp.headers.get("content-type", "")
         if "text/html" not in content_type and "application/xhtml" not in content_type:
             return {
-                "url": url, "title": "", "content": resp.text[:2000],
+                "url": url,
+                "title": "",
+                "content": resp.text[:2000],
                 "markdown": "",
-                "status": "ok", "content_type": content_type,
+                "status": "ok",
+                "content_type": content_type,
             }
 
         result = _extract_html(url, resp.text)
 
-        # V17: JS rendering fallback — if content is minimal, try Playwright
-        if len(result.get("content", "")) < 100:
+        # V17 + M8: JS rendering fallback via _needs_js_render() helper.
+        if _needs_js_render(result.get("content", ""), resp.text):
             from cuba_search import js_render
+
             if js_render.is_available():
-                logger.info("Minimal content — trying Playwright for %s", url)
+                logger.info("Minimal/SPA content — trying Playwright for %s", url)
                 rendered = await js_render.render_page(url)
                 if rendered.get("html"):
                     result = _extract_html(url, rendered["html"])
@@ -242,13 +298,19 @@ async def scrape_url(
 
     except httpx.HTTPStatusError as e:
         return {
-            "url": url, "title": "", "content": "",
-            "status": "error", "error": f"HTTP {e.response.status_code}",
+            "url": url,
+            "title": "",
+            "content": "",
+            "status": "error",
+            "error": f"HTTP {e.response.status_code}",
         }
     except (httpx.HTTPError, TimeoutError) as e:
         return {
-            "url": url, "title": "", "content": "",
-            "status": "error", "error": str(type(e).__name__),
+            "url": url,
+            "title": "",
+            "content": "",
+            "status": "error",
+            "error": str(type(e).__name__),
         }
     finally:
         if own_client:
@@ -269,6 +331,7 @@ def _extract_html(url: str, html: str) -> dict[str, Any]:
     """
     try:
         from readability import Document
+
         doc = Document(html)
         title = doc.title()
         summary_html = doc.summary()
@@ -278,6 +341,7 @@ def _extract_html(url: str, html: str) -> dict[str, Any]:
 
     # V17: Markdown structured output
     from cuba_search.markdown import html_to_markdown
+
     md = html_to_markdown(summary_html)
 
     soup = BeautifulSoup(summary_html, "html.parser")

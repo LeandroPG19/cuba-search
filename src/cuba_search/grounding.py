@@ -5,6 +5,7 @@ Adopted techniques from Cuba MCPs:
 - Claim density patterns: cuba-thinking/quality-metrics.service.ts:189-199
 CC: all functions ≤ 5.
 """
+
 import re
 from typing import Any
 
@@ -19,11 +20,37 @@ _NEGATION_PATTERNS: list[re.Pattern[str]] = [
 
 # ── Claim patterns (ported from cuba-thinking, ~15 LOC) ────────────
 _CLAIM_PATTERNS: list[re.Pattern[str]] = [
-    re.compile(r"\b\d+(?:\.\d+)?%"),                                    # Percentages
-    re.compile(r"\b\d{2,}"),                                            # Numbers ≥ 2 digits (200ms, 1024, etc)
+    re.compile(r"\b\d+(?:\.\d+)?%"),  # Percentages
+    re.compile(r"\b\d{2,}"),  # Numbers ≥ 2 digits (200ms, 1024, etc)
     re.compile(r"\b(?:always|never|all|none|every|must)\b", re.IGNORECASE),  # Absolutes
     re.compile(r"\b(?:proves?|confirms?|demonstrates?|shows?)\b", re.IGNORECASE),  # Causal
 ]
+
+
+# ── Temporal change patterns (M9) ─────────────────────────────────
+# More specific than has_negation() — detects deprecation/replacement signals.
+_TEMPORAL_CHANGE_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"\b(?:deprecated|obsolete|discontinued|removed)\b", re.IGNORECASE),
+    re.compile(r"\breplaced\s+(?:by|with)\b", re.IGNORECASE),
+    re.compile(r"\bno\s+longer\s+(?:supported|maintained|available|works?)\b", re.IGNORECASE),
+    re.compile(r"\b(?:was|were)\s+(?:previously|formerly)\b", re.IGNORECASE),
+]
+
+
+def has_temporal_change(text: str) -> bool:
+    """Detect if text mentions deprecation, removal, or replacement of a feature.
+
+    More precise than has_negation() — avoids false positives from common
+    negation words ("not None", "does not support") by focusing on
+    lifecycle-change vocabulary.
+
+    Args:
+        text: Text to check.
+
+    Returns:
+        True if temporal/lifecycle change pattern found.
+    """
+    return any(p.search(text) for p in _TEMPORAL_CHANGE_PATTERNS)
 
 
 def has_negation(text: str) -> bool:
@@ -58,7 +85,13 @@ def detect_contradictions(
     flagged = []
     for r in results:
         content = r.get(content_key, "")
-        r_copy = {**r, "has_contradiction_markers": has_negation(content)}
+        r_copy = {
+            **r,
+            "has_contradiction_markers": has_negation(content),
+            # M9: Separate signal for deprecation/lifecycle changes — more
+            # precise than has_negation for identifying outdated information.
+            "has_temporal_change": has_temporal_change(content),
+        }
         flagged.append(r_copy)
     return flagged
 
@@ -158,9 +191,7 @@ def cross_source_agreement(
     if len(results) < 2:
         return [{**r, "agreement_score": 0.0} for r in results]
 
-    term_sets = [
-        set(r.get(content_key, "").lower().split()) for r in results
-    ]
+    term_sets = [set(r.get(content_key, "").lower().split()) for r in results]
 
     return [
         {**r, "agreement_score": round(_compute_avg_agreement(i, term_sets), 4)}

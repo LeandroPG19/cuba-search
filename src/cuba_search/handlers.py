@@ -4,9 +4,32 @@ Each handler orchestrates the pipeline stages for its tool.
 Dispatch table at module level for O(1) routing.
 CC: all handlers ≤ 7.
 """
+
 import json
 import logging
+import re as _re
 from typing import Any
+
+# ── M3: Dynamic freshness weighting ────────────────────────────────
+# Temporal queries need higher freshness weight and lower source_tier weight
+# (established docs may be outdated). Remaining 0.55 is split: semantic=0.20,
+# info_density=0.10, cross_agreement=0.10, plus the three variable weights = 1.0.
+_TEMPORAL_RE = _re.compile(
+    r"\b(?:latest|newest|current|2025|2026|recent|now|today|updated?)\b",
+    _re.IGNORECASE,
+)
+
+
+def _confidence_weights(query: str) -> tuple[float, float, float]:
+    """Return (w_content, w_tier, w_freshness) adjusted for temporal queries.
+
+    Temporal queries boost freshness and reduce source_tier weight, since
+    authoritative but old docs rank poorly for time-sensitive topics.
+    """
+    if _TEMPORAL_RE.search(query):
+        return 0.20, 0.15, 0.25
+    return 0.25, 0.20, 0.15
+
 
 from cuba_search import retrieval, quality, ranking, compression
 from cuba_search import grounding, scraper, crawler, docs, partitioning
@@ -51,14 +74,18 @@ async def handle_search(args: dict[str, Any]) -> str:
 
     # V1: Retrieve (use expanded query for broader recall)
     results = await retrieval.search(
-        expanded, categories, language, time_range, max_results * 2,
+        expanded,
+        categories,
+        language,
+        time_range,
+        max_results * 2,
     )
 
     # V2+V3+V12: Quality pipeline
     results = quality.filter_and_classify(results)
 
-    # V1+V14: Rank with BM25 (use normalized for precision)
-    results = ranking.bm25_rank(normalized, results, text_key="content")
+    # V1+V14: Rank with BM25 — M2: use intent-adapted k1/b params
+    results = ranking.bm25_rank(normalized, results, text_key="content", intent=intent)
 
     # V16: Semantic reranking
     results = semantic.semantic_rerank(normalized, results)
@@ -76,6 +103,9 @@ async def handle_search(args: dict[str, Any]) -> str:
     # Cross-source agreement
     results = grounding.cross_source_agreement(results)
 
+    # M3: Dynamic confidence weights (temporal queries boost freshness)
+    w_content, w_tier, w_freshness = _confidence_weights(normalized)
+
     # Confidence scoring (6 signals including semantic)
     for r in results:
         conf, level = ranking.compute_confidence(
@@ -85,14 +115,20 @@ async def handle_search(args: dict[str, Any]) -> str:
             info_density=r.get("info_density", 0.5),
             cross_agreement=r.get("agreement_score", 0.0),
             semantic_score=r.get("semantic_score", 0.0),
+            w_content=w_content,
+            w_tier=w_tier,
+            w_freshness=w_freshness,
         )
         r["confidence"] = conf
         r["confidence_level"] = level
 
+    # M6: Diversity — limit results per domain before truncating
+    results = _diversify_results(results)
+
     # Truncate to requested count
     results = results[:max_results]
 
-    # V5: Compress content
+    # V5: Compress content (M1: weighted budget via distribute_budget)
     results = compression.compress_results(results, normalized, total_budget=3000)
 
     response = {
@@ -117,7 +153,9 @@ async def handle_scrape(args: dict[str, Any]) -> str:
     # Compress to budget
     if result.get("content"):
         result["content"] = compression.compress_to_budget(
-            result["content"], query=url, max_tokens=max_tokens,
+            result["content"],
+            query=url,
+            max_tokens=max_tokens,
         )
         result["token_count"] = query_mod.estimate_tokens(result["content"])
 
@@ -133,11 +171,13 @@ async def handle_crawl(args: dict[str, Any]) -> str:
 
     results = await crawler.crawl(url, max_pages, max_depth, instructions)
 
-    return _serialize({
-        "start_url": url,
-        "pages_crawled": len(results),
-        "results": results,
-    })
+    return _serialize(
+        {
+            "start_url": url,
+            "pages_crawled": len(results),
+            "results": results,
+        }
+    )
 
 
 async def handle_extract(args: dict[str, Any]) -> str:
@@ -156,14 +196,18 @@ async def handle_extract(args: dict[str, Any]) -> str:
         scraped = await scraper.scrape_url(url)
         if scraped.get("content") and query:
             scraped["content"] = compression.compress_to_budget(
-                scraped["content"], query, max_tokens=budget,
+                scraped["content"],
+                query,
+                max_tokens=budget,
             )
         results.append(scraped)
 
-    return _serialize({
-        "url_count": len(urls),
-        "results": results,
-    })
+    return _serialize(
+        {
+            "url_count": len(urls),
+            "results": results,
+        }
+    )
 
 
 async def handle_map(args: dict[str, Any]) -> str:
@@ -182,11 +226,13 @@ async def handle_map(args: dict[str, Any]) -> str:
         same_domain_only=same_domain,
     )
 
-    return _serialize({
-        "start_url": url,
-        "url_count": min(len(urls), max_urls),
-        "urls": urls[:max_urls],
-    })
+    return _serialize(
+        {
+            "start_url": url,
+            "url_count": min(len(urls), max_urls),
+            "urls": urls[:max_urls],
+        }
+    )
 
 
 async def handle_validate(args: dict[str, Any]) -> str:
@@ -208,38 +254,38 @@ async def handle_validate(args: dict[str, Any]) -> str:
     claim_has_negation = grounding.has_negation(claim)
     total_claims = grounding.count_claims(claim)
 
-    sources_supporting = sum(
-        1 for r in results
-        if not r.get("has_contradiction_markers", False)
-    )
+    sources_supporting = sum(1 for r in results if not r.get("has_contradiction_markers", False))
 
     overall_conf, conf_level = ranking.compute_confidence(
         content_relevance=min(results[0].get("bm25_score", 0) / 10.0, 1.0) if results else 0,
         source_tier=sum(r.get("tier_score", 0.4) for r in results) / max(len(results), 1),
         freshness=0.7,
-        info_density=sum(ranking.information_density(r.get("content", "")) for r in results) / max(len(results), 1),
+        info_density=sum(ranking.information_density(r.get("content", "")) for r in results)
+        / max(len(results), 1),
         cross_agreement=sum(r.get("agreement_score", 0) for r in results) / max(len(results), 1),
     )
 
-    return _serialize({
-        "claim": claim,
-        "has_negation_markers": claim_has_negation,
-        "verifiable_claims": total_claims,
-        "sources_checked": len(results),
-        "sources_supporting": sources_supporting,
-        "overall_confidence": overall_conf,
-        "confidence_level": conf_level,
-        "sources": [
-            {
-                "url": r.get("url", ""),
-                "title": r.get("title", ""),
-                "source_tier": r.get("source_tier"),
-                "has_contradictions": r.get("has_contradiction_markers", False),
-                "agreement": r.get("agreement_score", 0),
-            }
-            for r in results
-        ],
-    })
+    return _serialize(
+        {
+            "claim": claim,
+            "has_negation_markers": claim_has_negation,
+            "verifiable_claims": total_claims,
+            "sources_checked": len(results),
+            "sources_supporting": sources_supporting,
+            "overall_confidence": overall_conf,
+            "confidence_level": conf_level,
+            "sources": [
+                {
+                    "url": r.get("url", ""),
+                    "title": r.get("title", ""),
+                    "source_tier": r.get("source_tier"),
+                    "has_contradictions": r.get("has_contradiction_markers", False),
+                    "agreement": r.get("agreement_score", 0),
+                }
+                for r in results
+            ],
+        }
+    )
 
 
 async def handle_docs(args: dict[str, Any]) -> str:
@@ -252,22 +298,87 @@ async def handle_docs(args: dict[str, Any]) -> str:
     return _serialize(result)
 
 
+# M7: Adjusted depth config — quick now scrapes 2 URLs (was 0),
+# deep covers 20 results and 7 deep-scraped pages.
 _DEPTH_CONFIG: dict[str, dict[str, int | bool]] = {
-    "quick": {"max_results": 5, "scrape_top": 0},
-    "standard": {"max_results": 10, "scrape_top": 3},
-    "deep": {"max_results": 15, "scrape_top": 5},
+    "quick": {"max_results": 8, "scrape_top": 2},
+    "standard": {"max_results": 12, "scrape_top": 4},
+    "deep": {"max_results": 20, "scrape_top": 7},
 }
+
+# M5: Seeds for query reformulation in iterative deepening
+_INTENT_SEEDS: dict[str, list[str]] = {
+    "code": ["example", "tutorial", "how to"],
+    "academic": ["paper", "study", "research"],
+    "navigational": ["official", "docs", "guide"],
+    "informational": ["guide", "overview", "explained"],
+}
+
+
+def _diversify_results(
+    results: list[dict[str, Any]],
+    max_per_domain: int = 2,
+) -> list[dict[str, Any]]:
+    """Limit results per domain (MMR simplified, Carbonell & Goldstein 1998).
+
+    Tier-1 sources (official docs) get one extra slot since they are
+    authoritative even if multiple pages are relevant.
+
+    Args:
+        results: Ranked results to diversify.
+        max_per_domain: Max results per unique domain.
+
+    Returns:
+        Filtered results with at most max_per_domain per domain.
+    """
+    from urllib.parse import urlparse
+
+    domain_counts: dict[str, int] = {}
+    filtered = []
+    for r in results:
+        netloc = urlparse(r.get("url", "")).netloc.lower()
+        limit = max_per_domain + (1 if r.get("source_tier", 3) == 1 else 0)
+        if domain_counts.get(netloc, 0) < limit:
+            filtered.append(r)
+            domain_counts[netloc] = domain_counts.get(netloc, 0) + 1
+    return filtered
+
+
+async def _research_retry(
+    normalized: str,
+    intent: str,
+    max_results: int,
+) -> list[dict[str, Any]]:
+    """Generate alternative sub-queries and search (one retry round).
+
+    Used by iterative deepening when initial results have low confidence.
+    Appends intent-specific seed terms to the original query to broaden
+    retrieval without needing an external LLM.
+
+    Args:
+        normalized: Normalized original query.
+        intent: Detected query intent for seed selection.
+        max_results: Max results per sub-query.
+
+    Returns:
+        Fused results from alternative queries.
+    """
+    seeds = _INTENT_SEEDS.get(intent, _INTENT_SEEDS["informational"])
+    alt_queries = [f"{normalized} {seed}" for seed in seeds[:2]]
+    return await _search_sub_queries(alt_queries, max_results, intent=intent)
 
 
 async def _search_sub_queries(
     sub_queries: list[str],
     max_results: int,
+    intent: str = "informational",
 ) -> list[dict[str, Any]]:
     """Search all sub-queries and fuse with RRF.
 
     Args:
         sub_queries: Atomic sub-queries.
         max_results: Max results per sub-query.
+        intent: Query intent for M2 BM25 parameter selection.
 
     Returns:
         Fused results from all sub-queries.
@@ -276,7 +387,8 @@ async def _search_sub_queries(
     for sq in sub_queries:
         results = await retrieval.search(sq, max_results=max_results)
         results = quality.filter_and_classify(results)
-        results = ranking.bm25_rank(sq, results, text_key="content")
+        # M2: pass intent for domain-adapted BM25 params
+        results = ranking.bm25_rank(sq, results, text_key="content", intent=intent)
         all_rankings.append(results)
 
     if len(all_rankings) > 1:
@@ -324,6 +436,9 @@ def _enrich_results(
     enriched = grounding.detect_contradictions(results, content_key="content")
     enriched = grounding.cross_source_agreement(enriched, content_key="content")
 
+    # M3: Dynamic confidence weights based on temporal keywords in query
+    w_content, w_tier, w_freshness = _confidence_weights(query)
+
     for r in enriched:
         content = r.get("full_content", r.get("content", ""))
         r["info_density"] = round(ranking.information_density(content), 4)
@@ -334,6 +449,9 @@ def _enrich_results(
             freshness=0.7,
             info_density=r.get("info_density", 0.5),
             cross_agreement=r.get("agreement_score", 0.0),
+            w_content=w_content,
+            w_tier=w_tier,
+            w_freshness=w_freshness,
         )
         r["confidence"] = conf
         r["confidence_level"] = level
@@ -347,11 +465,13 @@ async def handle_research(args: dict[str, Any]) -> str:
     max_tokens = args.get("max_tokens", 3000)
 
     normalized = query_mod.normalize_query(raw_query)
+    intent = query_mod.detect_intent(normalized)
     sub_queries = query_mod.decompose_query(normalized)
     config = _DEPTH_CONFIG.get(depth, _DEPTH_CONFIG["standard"])
+    max_res = int(config["max_results"])
 
-    # Search + fuse
-    fused = await _search_sub_queries(sub_queries, int(config["max_results"]))
+    # Search + fuse — M2: pass intent for adapted BM25 params
+    fused = await _search_sub_queries(sub_queries, max_res, intent=intent)
 
     # Deep scrape
     scrape_n = int(config["scrape_top"])
@@ -361,21 +481,39 @@ async def handle_research(args: dict[str, Any]) -> str:
     # Enrich with quality metrics
     fused = _enrich_results(fused, normalized)
 
-    # Compress and clean up
+    # M5: Iterative deepening — retry if top-3 confidence is weak
+    top3 = fused[:3]
+    if top3:
+        mean_conf = sum(r.get("confidence", 0.0) for r in top3) / len(top3)
+        if mean_conf < 0.45:
+            retry = await _research_retry(normalized, intent, max_res)
+            if retry:
+                retry_enriched = _enrich_results(retry, normalized)
+                fused = ranking.rrf_fuse([fused, retry_enriched])
+                fused = _enrich_results(fused, normalized)
+
+    # M6: Diversity — limit per-domain results
+    fused = _diversify_results(fused)
+
+    # Compress and clean up (M1: weighted budget)
     fused = compression.compress_results(
-        fused, normalized, total_budget=max_tokens,
+        fused,
+        normalized,
+        total_budget=max_tokens,
         content_key="content",
     )
     for r in fused:
         r.pop("full_content", None)
 
-    return _serialize({
-        "query": raw_query,
-        "sub_queries": sub_queries,
-        "depth": depth,
-        "result_count": len(fused),
-        "results": fused[:int(config["max_results"])],
-    })
+    return _serialize(
+        {
+            "query": raw_query,
+            "sub_queries": sub_queries,
+            "depth": depth,
+            "result_count": len(fused),
+            "results": fused[:max_res],
+        }
+    )
 
 
 # ── Dispatch table (O(1) routing) ─────────────────────────────────
