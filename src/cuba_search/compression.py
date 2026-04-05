@@ -2,6 +2,11 @@
 
 Reuses the same BM25 algorithm from ranking.py at sentence level.
 No TextRank graph — simpler and faster.
+
+M14: Contextual coherence — EXIT-inspired (ACL Findings 2025, arXiv:2412.12559).
+After BM25 selects top sentences, the next sentence is included when it starts
+with a context connector (pronoun/demonstrative), preserving reference chains
+like "FastAPI uses Pydantic. It validates all inputs automatically."
 CC: all functions ≤ 5.
 """
 
@@ -13,6 +18,15 @@ from cuba_search.ranking import bm25_score
 
 # Sentence boundary regex (handles abbreviations somewhat)
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z\u00C0-\u024F])")
+
+# M14: Context connectors — sentences starting with these reference prior content.
+# Including them preserves pronoun chains and demonstrative references.
+_CONTEXT_CONNECTOR_RE = re.compile(
+    r"^(?:It|Its|They|Their|These|This|That|Such|The same|Both|"
+    r"However|Therefore|Thus|Hence|As a result|Consequently|"
+    r"Additionally|Furthermore|Moreover|In addition)\b",
+    re.IGNORECASE,
+)
 
 
 def split_sentences(text: str) -> list[str]:
@@ -26,6 +40,36 @@ def split_sentences(text: str) -> list[str]:
     """
     sentences = _SENTENCE_RE.split(text)
     return [s.strip() for s in sentences if len(s.strip()) > 10]
+
+
+def _add_context_neighbors(
+    selected: list[tuple[int, float, str]],
+    sentences: list[str],
+) -> list[tuple[int, float, str]]:
+    """Add immediately-following context-connector sentences to the selection.
+
+    M14: EXIT (ACL Findings 2025) shows that preserving inter-sentence
+    reference chains (pronouns, demonstratives, discourse markers) improves
+    extractive compression quality for QA tasks. When sentence i+1 starts
+    with a connector word, it likely references sentence i — include it.
+
+    Args:
+        selected: Already-selected (idx, score, text) tuples.
+        sentences: All sentences in original order.
+
+    Returns:
+        Extended selection with context neighbors added.
+    """
+    selected_indices = {idx for idx, _, _ in selected}
+    additions: list[tuple[int, float, str]] = []
+    for idx, score, _ in selected:
+        next_idx = idx + 1
+        if next_idx >= len(sentences) or next_idx in selected_indices:
+            continue
+        if _CONTEXT_CONNECTOR_RE.match(sentences[next_idx]):
+            additions.append((next_idx, score * 0.9, sentences[next_idx]))
+            selected_indices.add(next_idx)
+    return selected + additions
 
 
 def compress_to_budget(
@@ -72,6 +116,9 @@ def compress_to_budget(
     # Sort by score, take top N
     scored.sort(key=lambda x: x[1], reverse=True)
     selected = scored[:max_sentences]
+
+    # M14: Expand selection with context connector neighbors (EXIT-inspired)
+    selected = _add_context_neighbors(selected, sentences)
 
     # Re-sort by original position for coherence
     selected.sort(key=lambda x: x[0])

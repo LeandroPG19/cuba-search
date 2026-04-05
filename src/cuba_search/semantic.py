@@ -1,8 +1,10 @@
 """Semantic similarity via model2vec static embeddings.
 
-Uses potion-base-8M (MTEB SOTA for static embeddings):
-- 8M params, 256 dims, 7.5MB on disk
+M11: potion-retrieval-32M (SOTA static retrieval, MinishLab Jan 2025):
+- 32M params, 256 dims, ~30MB on disk
+- Retrieval nDCG@10: 35.06 vs 31.11 for potion-base-8M (+4 points)
 - 500× faster than BERT (Tulkens & van Dongen 2024)
+- Fine-tuned specifically for retrieval, not general-purpose
 - No PyTorch — numpy only at runtime
 
 M4: Batch encoding + sentence-aware snippet selection.
@@ -17,7 +19,7 @@ import numpy as np
 logger = logging.getLogger("cuba-search.semantic")
 
 # ── Lazy model singleton ───────────────────────────────────────────
-_MODEL_NAME: str = "minishlab/potion-base-8M"
+_MODEL_NAME: str = "minishlab/potion-retrieval-32M"
 _model: Any = None
 
 # Max sentences to scan when selecting best snippet (performance cap)

@@ -8,6 +8,7 @@ dependencies = [
     "beautifulsoup4>=4.12",
     "readability-lxml>=0.8",
     "model2vec>=0.4",
+    "trafilatura>=2.0.0",
 ]
 
 [project.optional-dependencies]
@@ -49,3 +50,8 @@ warn_unused_configs = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "radon>=6.0.1",
+]

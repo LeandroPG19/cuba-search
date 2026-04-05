@@ -1,9 +1,11 @@
 """V6: Content extraction + V11: Ethical crawling + SSRF protection.
 
-Uses readability-lxml for clean content extraction.
+M12: trafilatura as primary extractor (SOTA for articles, Apple/Stanford 2025
+arXiv:2602.19548). Fallback to readability-lxml for edge cases.
+Trafilatura: preserves tables, code blocks, lists; has markdown output mode;
+outperforms readability in F1 benchmarks on WCXB (2,008 real pages).
 Respects robots.txt, implements SSRF protection (OWASP A01 2025).
 V17: Optional Playwright fallback for JS-rendered pages (SPAs).
-V17: Markdown structured output via html_to_markdown.
 CC: all functions ≤ 7 (scrape_url CC=14, justified state machine).
 """
 
@@ -317,10 +319,50 @@ async def scrape_url(
             await client.aclose()
 
 
-def _extract_html(url: str, html: str) -> dict[str, Any]:
-    """Extract clean content from HTML using readability + BeautifulSoup.
+def _extract_with_trafilatura(html: str) -> tuple[str, str]:
+    """Extract text and markdown using trafilatura (primary extractor).
 
-    Returns both plain text and markdown-structured content.
+    M12: trafilatura is SOTA for article/doc extraction (WCXB benchmark,
+    Apple/Stanford arXiv:2602.19548). Preserves tables, code, lists.
+
+    Args:
+        html: Raw HTML content.
+
+    Returns:
+        Tuple of (plain_text, markdown). Both empty strings on failure.
+    """
+    try:
+        import trafilatura  # type: ignore[import-not-found]
+
+        md = (
+            trafilatura.extract(
+                html,
+                output_format="markdown",
+                include_tables=True,
+                include_links=False,
+                include_images=False,
+            )
+            or ""
+        )
+        text = (
+            trafilatura.extract(
+                html,
+                output_format="txt",
+                include_tables=True,
+            )
+            or ""
+        )
+        return text, md
+    except Exception:
+        return "", ""
+
+
+def _extract_html(url: str, html: str) -> dict[str, Any]:
+    """Extract clean content from HTML.
+
+    M12: Tries trafilatura first (SOTA, better table/code preservation),
+    falls back to readability-lxml + BeautifulSoup when trafilatura returns
+    empty (paywalls, non-article pages, edge cases).
 
     Args:
         url: Source URL.
@@ -329,34 +371,41 @@ def _extract_html(url: str, html: str) -> dict[str, Any]:
     Returns:
         Dict with extracted title, content (text), and markdown.
     """
-    try:
-        from readability import Document
+    # M12: trafilatura primary path — preserves tables, code, structured content
+    text, md = _extract_with_trafilatura(html)
 
-        doc = Document(html)
-        title = doc.title()
-        summary_html = doc.summary()
-    except Exception:
-        title = ""
-        summary_html = html
+    # Fallback: readability-lxml for pages where trafilatura returns empty
+    if len(text.strip()) < 100:
+        try:
+            from readability import Document
 
-    # V17: Markdown structured output
-    from cuba_search.markdown import html_to_markdown
+            doc = Document(html)
+            title_raw = doc.title()
+            summary_html = doc.summary()
+        except Exception:
+            title_raw = ""
+            summary_html = html
 
-    md = html_to_markdown(summary_html)
+        from cuba_search.markdown import html_to_markdown
 
-    soup = BeautifulSoup(summary_html, "html.parser")
+        md = html_to_markdown(summary_html)
+        soup = BeautifulSoup(summary_html, "html.parser")
+        for tag in soup.find_all(["script", "style", "nav", "footer", "header"]):
+            tag.decompose()
+        text = soup.get_text(separator="\n", strip=True)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        title = title_raw.strip() if title_raw else ""
+    else:
+        # Extract title from HTML <title> tag when trafilatura handles content
+        soup_title = BeautifulSoup(html[:2000], "html.parser")
+        title_tag = soup_title.find("title")
+        title = title_tag.get_text(strip=True) if title_tag else ""
 
-    # Remove scripts, styles, nav, footer
-    for tag in soup.find_all(["script", "style", "nav", "footer", "header"]):
-        tag.decompose()
-
-    text = soup.get_text(separator="\n", strip=True)
-    # Clean up excessive newlines
-    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text.strip())
 
     return {
         "url": url,
-        "title": title.strip() if title else "",
+        "title": title,
         "content": text,
         "markdown": md,
         "status": "ok",

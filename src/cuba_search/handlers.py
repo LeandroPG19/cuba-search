@@ -344,25 +344,144 @@ def _diversify_results(
     return filtered
 
 
+# PRF stopwords (module-level constant, not re-created per call)
+_PRF_STOPS: frozenset[str] = frozenset(
+    {
+        "the",
+        "a",
+        "an",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "has",
+        "have",
+        "had",
+        "do",
+        "does",
+        "did",
+        "will",
+        "would",
+        "could",
+        "should",
+        "may",
+        "might",
+        "of",
+        "in",
+        "to",
+        "for",
+        "on",
+        "at",
+        "by",
+        "as",
+        "with",
+        "from",
+        "that",
+        "this",
+        "it",
+        "its",
+        "they",
+        "their",
+        "we",
+        "our",
+        "you",
+        "your",
+        "he",
+        "she",
+    }
+)
+
+
+def _score_prf_terms(
+    all_doc_terms: list[list[str]],
+    query_terms: set[str],
+) -> dict[str, float]:
+    """Compute RM3-inspired tf×idf scores for PRF expansion candidates.
+
+    score(t) = Σ_d  (tf(t,d) / |d|) × log(N / (df(t) + 1) + 1)
+
+    Excludes query terms, stopwords, and tokens shorter than 4 chars.
+    """
+    import math
+    from collections import Counter
+
+    n_docs = len(all_doc_terms)
+    df: dict[str, int] = {}
+    for terms in all_doc_terms:
+        for t in set(terms):
+            df[t] = df.get(t, 0) + 1
+
+    term_scores: dict[str, float] = {}
+    for terms in all_doc_terms:
+        if not terms:
+            continue
+        tf_counts = Counter(terms)
+        doc_len = len(terms)
+        for t, tf in tf_counts.items():
+            if len(t) < 4 or t in query_terms or t in _PRF_STOPS:
+                continue
+            idf = math.log(n_docs / (df.get(t, 0) + 1) + 1.0)
+            term_scores[t] = term_scores.get(t, 0.0) + (tf / doc_len) * idf
+    return term_scores
+
+
+def _prf_expand_query(
+    normalized: str,
+    top_docs: list[dict[str, Any]],
+    top_k: int = 5,
+) -> str:
+    """RM3-inspired PRF: expand query with top tf×idf terms from top documents.
+
+    Math (simplified RM3, Lavrenko & Croft 2001):
+        score(t) = Σ_d  (tf(t,d) / |d|) × log(N / (df(t) + 1) + 1)
+
+    Delegates scoring to _score_prf_terms() to keep CC ≤ 7.
+
+    Args:
+        normalized: Normalized original query.
+        top_docs: Top-ranked documents from first retrieval pass.
+        top_k: Number of expansion terms to add.
+
+    Returns:
+        Original query + top_k PRF expansion terms.
+    """
+    query_terms = set(normalized.lower().split())
+    all_doc_terms = [doc.get("content", "").lower().split() for doc in top_docs]
+    term_scores = _score_prf_terms(all_doc_terms, query_terms)
+    expansion = sorted(term_scores, key=term_scores.__getitem__, reverse=True)[:top_k]
+    return f"{normalized} {' '.join(expansion)}" if expansion else normalized
+
+
 async def _research_retry(
     normalized: str,
     intent: str,
     max_results: int,
+    top_docs: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Generate alternative sub-queries and search (one retry round).
 
-    Used by iterative deepening when initial results have low confidence.
-    Appends intent-specific seed terms to the original query to broaden
-    retrieval without needing an external LLM.
+    M16: When top_docs are provided, uses RM3-inspired PRF to extract
+    expansion terms from the retrieved documents — more systematic than
+    fixed seed words (arXiv:2503.14887, University of Queensland 2025).
+
+    Falls back to intent-seed expansion when top_docs is None.
 
     Args:
         normalized: Normalized original query.
-        intent: Detected query intent for seed selection.
+        intent: Detected query intent for seed selection / BM25 params.
         max_results: Max results per sub-query.
+        top_docs: Top documents from first retrieval pass (for PRF).
 
     Returns:
         Fused results from alternative queries.
     """
+    if top_docs:
+        # M16: PRF — tf×idf weighted expansion from actual top documents
+        prf_query = _prf_expand_query(normalized, top_docs[:3])
+        return await _search_sub_queries([prf_query], max_results, intent=intent)
+    # Fallback: intent-seed based expansion
     seeds = _INTENT_SEEDS.get(intent, _INTENT_SEEDS["informational"])
     alt_queries = [f"{normalized} {seed}" for seed in seeds[:2]]
     return await _search_sub_queries(alt_queries, max_results, intent=intent)
@@ -392,7 +511,12 @@ async def _search_sub_queries(
         all_rankings.append(results)
 
     if len(all_rankings) > 1:
-        return ranking.rrf_fuse(all_rankings)
+        # M15: Decay weights — first sub-query is closest to original intent.
+        # w_i = 1 / (1 + 0.2·i)  → 1.0, 0.83, 0.71, 0.63, ...
+        # Empirical basis: WRRF (Samuel et al. 2025) shows per-signal weighting
+        # improves nDCG@10 by up to 6.4% over uniform RRF.
+        decay = [1.0 / (1.0 + 0.2 * i) for i in range(len(all_rankings))]
+        return ranking.rrf_fuse(all_rankings, weights=decay)
     return all_rankings[0] if all_rankings else []
 
 
@@ -481,15 +605,18 @@ async def handle_research(args: dict[str, Any]) -> str:
     # Enrich with quality metrics
     fused = _enrich_results(fused, normalized)
 
-    # M5: Iterative deepening — retry if top-3 confidence is weak
+    # M5+M16: Iterative deepening with PRF — retry if top-3 confidence is weak.
+    # M16: Pass top_docs so _research_retry uses RM3-inspired tf×idf PRF
+    # instead of fixed seed words (arXiv:2503.14887).
+    # M15: Weight primary results 2× over retry (they come from original query).
     top3 = fused[:3]
     if top3:
         mean_conf = sum(r.get("confidence", 0.0) for r in top3) / len(top3)
         if mean_conf < 0.45:
-            retry = await _research_retry(normalized, intent, max_res)
+            retry = await _research_retry(normalized, intent, max_res, top_docs=top3)
             if retry:
                 retry_enriched = _enrich_results(retry, normalized)
-                fused = ranking.rrf_fuse([fused, retry_enriched])
+                fused = ranking.rrf_fuse([fused, retry_enriched], weights=[2.0, 1.0])
                 fused = _enrich_results(fused, normalized)
 
     # M6: Diversity — limit per-domain results

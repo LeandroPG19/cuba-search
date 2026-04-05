@@ -123,25 +123,36 @@ def bm25_rank(
 def rrf_fuse(
     signal_rankings: list[list[dict[str, Any]]],
     id_key: str = "url",
+    weights: list[float] | None = None,
 ) -> list[dict[str, Any]]:
-    """Reciprocal Rank Fusion across N ranked result lists.
+    """Weighted Reciprocal Rank Fusion across N ranked result lists.
 
-    Proven in cuba-memorys/search.py, Cormack et al. 2009.
+    M15: Adds per-signal weights (WRRF, Samuel et al. 2025 MMMORRF).
+    When weights is None, falls back to unweighted RRF (Cormack et al. 2009).
+
+    Formula: score(d) = Σ_i  w_i / (k + rank_i(d) + 1)
+
+    Weights let callers express signal priority:
+    - Primary search vs corrective retry: [2.0, 1.0]
+    - Multiple sub-queries decaying by position: [1.0, 0.83, 0.71, ...]
+    Normalisation is NOT applied — relative magnitudes determine influence.
 
     Args:
         signal_rankings: Lists of ranked results from different sources.
         id_key: Key to use as unique result identifier.
+        weights: Optional per-ranking weight (default: all 1.0).
 
     Returns:
         Fused results sorted by RRF score.
     """
+    effective_weights = weights if weights is not None else [1.0] * len(signal_rankings)
     scores: dict[str, float] = {}
     items: dict[str, dict[str, Any]] = {}
 
-    for ranking in signal_rankings:
+    for ranking, w in zip(signal_rankings, effective_weights, strict=False):
         for rank, item in enumerate(ranking):
             key = str(item.get(id_key, ""))
-            scores[key] = scores.get(key, 0) + 1.0 / (RRF_K + rank + 1)
+            scores[key] = scores.get(key, 0) + w / (RRF_K + rank + 1)
             if key not in items:
                 items[key] = item
 

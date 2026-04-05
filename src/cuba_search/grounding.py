@@ -3,6 +3,10 @@
 Adopted techniques from Cuba MCPs:
 - Negation patterns: cuba-memorys/search.py:34-40
 - Claim density patterns: cuba-thinking/quality-metrics.service.ts:189-199
+
+M13: cross_source_agreement uses cosine semantic similarity instead of
+     Jaccard lexical overlap — catches paraphrase agreement that Jaccard misses
+     (e.g. "machine learning" vs "deep learning" cosine≈0.85, Jaccard≈0.0).
 CC: all functions ≤ 5.
 """
 
@@ -26,7 +30,6 @@ _CLAIM_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\b(?:proves?|confirms?|demonstrates?|shows?)\b", re.IGNORECASE),  # Causal
 ]
 
-
 # ── Temporal change patterns (M9) ─────────────────────────────────
 # More specific than has_negation() — detects deprecation/replacement signals.
 _TEMPORAL_CHANGE_PATTERNS: list[re.Pattern[str]] = [
@@ -35,6 +38,9 @@ _TEMPORAL_CHANGE_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\bno\s+longer\s+(?:supported|maintained|available|works?)\b", re.IGNORECASE),
     re.compile(r"\b(?:was|were)\s+(?:previously|formerly)\b", re.IGNORECASE),
 ]
+
+# Max chars per document to embed for agreement scoring (speed cap)
+_AGREEMENT_SNIPPET_LEN: int = 300
 
 
 def has_temporal_change(text: str) -> bool:
@@ -133,53 +139,38 @@ def claim_density(text: str) -> float:
     return round(claims / len(sentences), 4)
 
 
-def _jaccard_similarity(set_a: set[str], set_b: set[str]) -> float:
-    """Compute Jaccard similarity between two term sets.
-
-    Args:
-        set_a: First set of terms.
-        set_b: Second set of terms.
+def _build_cosine_matrix(texts: list[str]) -> "tuple[Any, list[bool]]":
+    """Batch-encode texts and return L2-normalised cosine matrix + content mask.
 
     Returns:
-        Jaccard index in [0, 1].
+        (sim_matrix [n×n ndarray], has_content [bool list])
     """
-    union = len(set_a | set_b)
-    if union == 0:
-        return 0.0
-    return len(set_a & set_b) / union
+    import numpy as np
 
+    from cuba_search.semantic import _load_model
 
-def _compute_avg_agreement(
-    idx: int,
-    term_sets: list[set[str]],
-) -> float:
-    """Compute average Jaccard agreement of one item vs all others.
-
-    Args:
-        idx: Index of the item.
-        term_sets: All term sets.
-
-    Returns:
-        Average Jaccard index against all other items.
-    """
-    terms_i = term_sets[idx]
-    if not terms_i:
-        return 0.0
-    scores = [
-        _jaccard_similarity(terms_i, term_sets[j])
-        for j in range(len(term_sets))
-        if j != idx and term_sets[j]
-    ]
-    return sum(scores) / len(scores) if scores else 0.0
+    has_content = [bool(t.strip()) for t in texts]
+    model = _load_model()
+    raw_vecs = model.encode(texts)
+    norms = np.linalg.norm(raw_vecs, axis=1, keepdims=True)
+    norms = np.where(norms > 0, norms, 1.0)
+    vecs = raw_vecs / norms
+    return vecs @ vecs.T, has_content
 
 
 def cross_source_agreement(
     results: list[dict[str, Any]],
     content_key: str = "content",
 ) -> list[dict[str, Any]]:
-    """Estimate agreement between sources using shared term overlap.
+    """Estimate agreement between sources using semantic cosine similarity.
 
-    Simple Jaccard-like metric: shared unique terms / total unique terms.
+    M13: Replaces Jaccard lexical overlap with cosine similarity over
+    model2vec embeddings (batch encoded). Cosine catches paraphrase agreement
+    that Jaccard misses — e.g. "machine learning" vs "deep learning" have
+    Jaccard≈0.0 but cosine≈0.85.
+
+    Math: sim_matrix = V @ V.T where V = L2-normalized embedding matrix.
+    O(n × 256) encode + O(n² × 256) multiply — fast for n ≤ 20 results.
 
     Args:
         results: Search results with content.
@@ -191,9 +182,18 @@ def cross_source_agreement(
     if len(results) < 2:
         return [{**r, "agreement_score": 0.0} for r in results]
 
-    term_sets = [set(r.get(content_key, "").lower().split()) for r in results]
+    texts = [r.get(content_key, "")[:_AGREEMENT_SNIPPET_LEN] for r in results]
+    sim_matrix, has_content = _build_cosine_matrix(texts)
 
-    return [
-        {**r, "agreement_score": round(_compute_avg_agreement(i, term_sets), 4)}
-        for i, r in enumerate(results)
-    ]
+    scored = []
+    for i, r in enumerate(results):
+        if not has_content[i]:
+            scored.append({**r, "agreement_score": 0.0})
+            continue
+        other_sims = [
+            float(sim_matrix[i, j]) for j in range(len(results)) if j != i and has_content[j]
+        ]
+        avg_sim = sum(other_sims) / len(other_sims) if other_sims else 0.0
+        scored.append({**r, "agreement_score": round(max(0.0, avg_sim), 4)})
+
+    return scored
