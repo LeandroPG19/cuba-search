@@ -1,3 +1,20 @@
+> ## ⚠️ Archived — unmaintained, and it has a known SSRF hole
+>
+> This project is no longer developed. Its one durable idea, `cuba_docs`, now lives in
+> [**cuba-memorys**](https://github.com/LeandroPG19/cuba-memorys) behind `--features docs`.
+>
+> **Do not deploy this.** `_is_ssrf_safe()` in `scraper.py` and `crawler.py` never
+> resolves DNS: when the host is not a literal IP — which is to say, on every real
+> request — it compares the hostname against three strings and lets it through. Any
+> domain whose A record points at `169.254.169.254` walks past the guard and reads the
+> machine's cloud instance credentials.
+>
+> It was never published to PyPI or npm, so nothing installs it by accident. But it is
+> readable here, and it is wrong here, and you deserve to be told which. The rewritten
+> guard — resolving DNS, validating **every** resolved address, pinning the validated
+> address onto the connection against DNS rebinding, and re-checking each redirect hop —
+> is in [`cuba-memorys/rust/src/net/guard.rs`](https://github.com/LeandroPG19/cuba-memorys/blob/main/rust/src/net/guard.rs).
+
 # 🔍 Cuba-Search
 
 **Self-hosted MCP search server for AI agents.** Zero cost. Zero API keys. Zero cloud dependencies.
